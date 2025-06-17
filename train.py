@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from datasets import load_dataset, Dataset, DatasetDict
 from unsloth import FastLanguageModel
 from trl import SFTTrainer, SFTConfig
-from transformers import TextStreamer, StoppingCriteria, StoppingCriteriaList
+from transformers import TextStreamer, StoppingCriteria, StoppingCriteriaList, TrainingArguments
 
 # --------------------------------------------------------------------------- #
 # Pre-processing helpers
@@ -91,7 +91,7 @@ def get_args():
     p.add_argument("--max_seq_length", type=int, default=2048)
     p.add_argument("--function_call_pct", type=float, default=0.25)
     p.add_argument("--eval_pct", type=float, default=0.02)
-    p.add_argument("--max_steps", type=int, default=30)
+    p.add_argument("--max_steps", type=int, default=3)
     p.add_argument("--per_device_batch_size", type=int, default=1)
     p.add_argument("--gradient_accum", type=int, default=4)
     p.add_argument("--lr", type=float, default=2e-5)
@@ -120,7 +120,7 @@ def main():
         load_in_8bit    = False,
         full_finetuning = False,
     )
-
+    
     # 3) Attach LoRA adapters -------------------------------------------------
     model = FastLanguageModel.get_peft_model(
         model,
@@ -135,7 +135,7 @@ def main():
         use_rslora                  = False,
         loftq_config                = None,
     )
-
+    
     # 4) Pre-process datasets -------------------------------------------------
     processed_functioncall = functioncall_ds_raw.map(
         generate_conversation, batched=True)["conversations"]
@@ -172,9 +172,8 @@ def main():
         tokenizer      = tokenizer,
         train_dataset  = dataset_dict["train"],
         eval_dataset   = dataset_dict["eval"],
-        args = SFTConfig(
+        args = TrainingArguments(
             output_dir                  = args.output_dir,
-            dataset_text_field          = "text",
             per_device_train_batch_size = args.per_device_batch_size,
             warmup_steps                = 5,
             learning_rate               = args.lr,
@@ -186,19 +185,22 @@ def main():
             report_to                   = "none",
             fp16                        = True,
             dataloader_num_workers      = 4,
-            eval_on_start               = True,
             save_strategy               = "steps",
             save_steps                  = 10,
             save_total_limit            = 2,
             max_steps                   = args.max_steps,
-            gradient_accumulation_steps = args.gradient_accum,
+            eval_strategy               = "steps",
+            eval_steps                  = 10,
+            eval_on_start               = False,
+            save_strategy               = "steps",
+            save_steps                  = 10,
+            save_total_limit            = 2,
         ),
     )
 
     trainer_stats = trainer.train()
     trainer.save_model(os.path.join(args.output_dir, "final_checkpoint"))
     tokenizer.save_pretrained(os.path.join(args.output_dir, "final_checkpoint"))
-
     # ----------------------------------------------------------------------- #
     # 7) Robust function-calling evaluation                                   #
     # ----------------------------------------------------------------------- #
@@ -233,10 +235,13 @@ def main():
                 stopping_criteria  = StoppingCriteriaList([FunctionCallStopping()]),
             )[0]
 
+            prompt_ids = tokenizer(prompt)["input_ids"]    
+            prompt_len = len(prompt_ids)
+
             completion = tokenizer.decode(
-                gen_ids[len(tokenizer(prompt)["input_ids"][0]):],
+                gen_ids[prompt_len:],                    
                 skip_special_tokens=False
-            )
+)
             print(completion, end="", flush=True)
 
             if "<functioncall>" in completion:
