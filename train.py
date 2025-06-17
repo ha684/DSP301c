@@ -185,13 +185,13 @@ def main():
             report_to                   = "none",
             fp16                        = True,
             dataloader_num_workers      = 4,
-            use_liger                   = True,
             eval_on_start               = True,
-            num_train_epochs            = 1,
+            # num_train_epochs            = 1,
             save_strategy               = "steps",
             save_steps                  = 100,
             save_total_limit            = 2,
             evaluation_strategy         = "steps",
+            max_steps                   = 100,
         ),
     )
 
