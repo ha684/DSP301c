@@ -185,7 +185,6 @@ def main():
             report_to                   = "none",
             fp16                        = True,
             dataloader_num_workers      = 4,
-            save_steps                  = 10,
             save_total_limit            = 2,
             max_steps                   = args.max_steps,
             eval_strategy               = "steps",
@@ -193,7 +192,6 @@ def main():
             eval_on_start               = False,
             save_strategy               = "steps",
             save_steps                  = 10,
-            save_total_limit            = 2,
         ),
     )
 
