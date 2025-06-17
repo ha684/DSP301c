@@ -91,7 +91,7 @@ def get_args():
     p.add_argument("--max_seq_length", type=int, default=2048)
     p.add_argument("--function_call_pct", type=float, default=0.5)
     p.add_argument("--eval_pct", type=float, default=0.02)
-    p.add_argument("--max_steps", type=int, default=3)
+    p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--per_device_batch_size", type=int, default=1)
     p.add_argument("--gradient_accum", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-5)
@@ -178,7 +178,7 @@ def main():
             warmup_steps                = 5,
             learning_rate               = args.lr,
             logging_steps               = 1,
-            optim                       = "adamw_8bit",
+            optim                       = "adamw_torch",
             weight_decay                = 0.01,
             lr_scheduler_type           = "cosine",
             seed                        = 3407,
@@ -188,7 +188,7 @@ def main():
             save_total_limit            = 2,
             max_steps                   = args.max_steps,
             eval_strategy               = "steps",
-            eval_steps                  = 10,
+            eval_steps                  = 30,
             eval_on_start               = False,
             save_strategy               = "steps",
             save_steps                  = 10,
