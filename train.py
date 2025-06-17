@@ -154,9 +154,6 @@ def main():
             lr_scheduler_type            = "cosine",
             seed                         = 3407,
             report_to                    = "none",
-            evaluation_strategy          = "steps",
-            eval_steps                   = 5,
-            save_strategy                = "no",
         ),
     )
 
