@@ -1,21 +1,34 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Fine-tune Qwen3-4B với UnsLoTH + LoRA, log & plot loss / accuracy.
-Chạy:
+Fine-tune Qwen3-4B with UnsLoTH + LoRA, then **test its
+function-calling behaviour** in four modes:
+
+1.  Irrelevant function · no thinking
+2.  Irrelevant function · thinking
+3.  Relevant   function · no thinking
+4.  Relevant   function · thinking
+
+Run:
     python train_qwen_finetune.py --max_steps 30
 """
 
+# --------------------------------------------------------------------------- #
+# Imports
+# --------------------------------------------------------------------------- #
 import argparse, re, json, random, os, torch, math
 import pandas as pd
 import matplotlib.pyplot as plt
 from datasets import load_dataset, Dataset, DatasetDict
 from unsloth import FastLanguageModel
 from trl import SFTTrainer, SFTConfig
+from transformers import TextStreamer
 
-# ---------- Các hàm tiền xử lý ----------
+# --------------------------------------------------------------------------- #
+# Pre-processing helpers
+# --------------------------------------------------------------------------- #
 def generate_conversation(examples):
-    """Chuyển định dạng dataset function-calling sang list[{role,content}]"""
+    """Convert function-calling raw text → list[{role,content}]"""
     system_prompts, chats = examples["system"], examples["chat"]
     conversations = []
     for sys_raw, chat in zip(system_prompts, chats):
@@ -29,18 +42,21 @@ def generate_conversation(examples):
 
             user_msg = re.sub(r'<\|endoftext\|>', '', user_part).strip()
             if user_msg:
-                convo.append({"role": "user", "content": re.sub(r'\s+', ' ', user_msg)})
+                convo.append({"role": "user",
+                              "content": re.sub(r'\s+', ' ', user_msg)})
 
             for a in assistant_parts:
                 a_clean = re.sub(r'<\|endoftext\|>', '', a).strip()
-                # Tách phần FUNCTION RESPONSE nếu có
-                func = re.search(r'FUNCTION RESPONSE:\s*(.*?)(?=ASSISTANT:|USER:|$)', a_clean, re.DOTALL)
+                # Split out any FUNCTION RESPONSE blocks
+                func = re.search(r'FUNCTION RESPONSE:\s*(.*?)(?=ASSISTANT:|USER:|$)',
+                                 a_clean, re.DOTALL)
                 if func:
                     before = a_clean[:func.start()].strip()
                     tool   = func.group(1).strip()
                     after  = a_clean[func.end():].strip()
                     if before: convo.append({"role": "assistant", "content": before})
-                    if tool:   convo.append({"role": "user",      "content": f"tool response: {tool}"})
+                    if tool:   convo.append({"role": "user",
+                                             "content": f"tool response: {tool}"})
                     if after:  convo.append({"role": "assistant", "content": after})
                 else:
                     if a_clean:
@@ -48,17 +64,24 @@ def generate_conversation(examples):
         conversations.append(convo)
     return {"conversations": conversations}
 
+
 def reasoning_formatting(examples):
+    """OpenMathReasoning-mini: problem/solution → 2-turn chat"""
     problems, solutions = examples["problem"], examples["generated_solution"]
-    conversations = [[{"role":"user","content":p}, {"role":"assistant","content":s}] 
+    conversations = [[{"role": "user", "content": p},
+                      {"role": "assistant", "content": s}]
                      for p, s in zip(problems, solutions)]
     return {"conversations": conversations}
 
+
 def simple_exact_match(pred, label):
-    """So khớp toàn bộ chuỗi (có thể thay bằng fuzzy-match tuỳ bài)."""
+    """Exact-string matching metric stub."""
     return int(pred.strip() == label.strip())
 
-# ---------- Lấy đối số dòng lệnh ----------
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
 def get_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model_name", default="Qwen/Qwen3-4B")
@@ -72,30 +95,35 @@ def get_args():
     p.add_argument("--output_dir", default="./outputs")
     return p.parse_args()
 
-# ---------- Main ----------
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 def main():
     args = get_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
     # 1) Load datasets --------------------------------------------------------
-    reasoning_dataset   = load_dataset("unsloth/OpenMathReasoning-mini", split="cot")
-    functioncall_ds_raw = load_dataset("glaiveai/glaive-function-calling-v2", split="train")
+    reasoning_dataset   = load_dataset("unsloth/OpenMathReasoning-mini",
+                                       split="cot")
+    functioncall_ds_raw = load_dataset("glaiveai/glaive-function-calling-v2",
+                                       split="train")
 
-    # 2) Load tokenizer trước (cần cho apply_chat_template) -------------------
+    # 2) Load base model & tokenizer -----------------------------------------
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name        = args.model_name,
-        max_seq_length    = args.max_seq_length,
-        load_in_4bit      = True,
-        load_in_8bit      = False,
-        full_finetuning   = False,
+        model_name      = args.model_name,
+        max_seq_length  = args.max_seq_length,
+        load_in_4bit    = True,
+        load_in_8bit    = False,
+        full_finetuning = False,
     )
 
-    # 3) LoRA config ----------------------------------------------------------
+    # 3) Attach LoRA adapters -------------------------------------------------
     model = FastLanguageModel.get_peft_model(
         model,
         r                       = 32,
-        target_modules          = ["q_proj","k_proj","v_proj","o_proj",
-                                   "gate_proj","up_proj","down_proj"],
+        target_modules          = ["q_proj", "k_proj", "v_proj", "o_proj",
+                                   "gate_proj", "up_proj", "down_proj"],
         lora_alpha              = 32,
         lora_dropout            = 0,
         bias                    = "none",
@@ -105,26 +133,27 @@ def main():
         loftq_config            = None,
     )
 
-    # 4) Tiền xử lý -----------------------------------------------------------
-    processed_functioncall = functioncall_ds_raw.map(generate_conversation, batched=True)["conversations"]
-    processed_reasoning    = reasoning_dataset.map(reasoning_formatting, batched=True)["conversations"]
+    # 4) Pre-process datasets -------------------------------------------------
+    processed_functioncall = functioncall_ds_raw.map(
+        generate_conversation, batched=True)["conversations"]
+    processed_reasoning = reasoning_dataset.map(
+        reasoning_formatting, batched=True)["conversations"]
 
-    # Convert list-of-chats -> list-of-strings theo template tokenizer
-    reasoning_strs = tokenizer.apply_chat_template(processed_reasoning, tokenize=False)
-    function_strs  = tokenizer.apply_chat_template(processed_functioncall, tokenize=False)
+    reasoning_strs  = tokenizer.apply_chat_template(processed_reasoning,
+                                                    tokenize=False)
+    function_strs   = tokenizer.apply_chat_template(processed_functioncall,
+                                                    tokenize=False)
 
-    # Lấy subset function-calling theo tỉ lệ
     fc_subset = pd.Series(function_strs).sample(
-        int(len(reasoning_strs) * (args.function_call_pct/(1 - args.function_call_pct))),
-        random_state = 2407
+        int(len(reasoning_strs) *
+            (args.function_call_pct / (1 - args.function_call_pct))),
+        random_state=2407
     )
-
     data = pd.concat([pd.Series(reasoning_strs), fc_subset]).reset_index(drop=True)
     data.name = "text"
 
-    # 5) Chia train / eval -----------------------------------------------------
-    df = pd.DataFrame(data)
-    df = df.sample(frac=1, random_state=3407)  # shuffle
+    # 5) Train / eval split ---------------------------------------------------
+    df = pd.DataFrame(data).sample(frac=1, random_state=3407)  # shuffle
     n_eval   = int(len(df) * args.eval_pct)
     eval_df  = df.iloc[:n_eval]
     train_df = df.iloc[n_eval:]
@@ -134,26 +163,35 @@ def main():
         "eval" : Dataset.from_pandas(eval_df,  preserve_index=False),
     })
 
-    # 6) Huấn luyện -----------------------------------------------------------
+    # 6) Training -------------------------------------------------------------
     trainer = SFTTrainer(
         model          = model,
         tokenizer      = tokenizer,
         train_dataset  = dataset_dict["train"],
         eval_dataset   = dataset_dict["eval"],
         args = SFTConfig(
-            output_dir                   = args.output_dir,
-            dataset_text_field           = "text",
-            per_device_train_batch_size  = args.per_device_batch_size,
-            gradient_accumulation_steps  = args.gradient_accum,
-            warmup_steps                 = 5,
-            max_steps                    = args.max_steps,
-            learning_rate                = args.lr,
-            logging_steps                = 1,
-            optim                        = "adamw_8bit",
-            weight_decay                 = 0.01,
-            lr_scheduler_type            = "cosine",
-            seed                         = 3407,
-            report_to                    = "none",
+            output_dir                  = args.output_dir,
+            dataset_text_field          = "text",
+            per_device_train_batch_size = args.per_device_batch_size,
+            gradient_accumulation_steps = args.gradient_accum,
+            warmup_steps                = 5,
+            # max_steps                  = args.max_steps,  # optional override
+            learning_rate               = args.lr,
+            logging_steps               = 1,
+            optim                       = "adamw_8bit",
+            weight_decay                = 0.01,
+            lr_scheduler_type           = "cosine",
+            seed                        = 3407,
+            report_to                   = "none",
+            fp16                        = True,
+            dataloader_num_workers      = 4,
+            use_liger                   = True,
+            eval_on_start               = True,
+            num_train_epochs            = 1,
+            save_strategy               = "steps",
+            save_steps                  = 100,
+            save_total_limit            = 2,
+            evaluation_strategy         = "steps",
         ),
     )
 
@@ -161,29 +199,68 @@ def main():
     trainer.save_model(os.path.join(args.output_dir, "final_checkpoint"))
     tokenizer.save_pretrained(os.path.join(args.output_dir, "final_checkpoint"))
 
-    # 7) Đánh giá nhanh --------------------------------------------------------
-    def evaluate_exact_match(eval_dataset, max_gen_tokens=128, num_samples=100):
-        """Lấy ngẫu nhiên một phần eval để tính exact-match."""
-        subset = eval_dataset.shuffle(seed=123)[:num_samples]
-        matches = 0
-        for sample in subset:
-            prompt = sample["text"]
-            # prompt đã bao gồm <|assistant|> tag cuối template; model chỉ cần generate tiếp
-            input_ids = tokenizer(prompt, return_tensors="pt").to(model.device)
-            with torch.no_grad():
-                output = model.generate(**input_ids, max_new_tokens=max_gen_tokens)
-            full = tokenizer.decode(output[0], skip_special_tokens=True)
-            # Tách phần assistant erzeugt ra (sau tag cuối cùng)
-            pred = full[len(tokenizer.decode(input_ids["input_ids"][0], skip_special_tokens=True)):]
-            # Lấy label thật (từ prompt sau tag <assistant>)
-            label = prompt.split("<assistant>")[-1]
-            matches += simple_exact_match(pred, label)
-        return matches / len(subset)
+    # ----------------------------------------------------------------------- #
+    # 7) Quick sanity-check: function-calling                                 #
+    # ----------------------------------------------------------------------- #
+    def run_generation(title: str, conversation: list[dict], thinking: bool):
+        """Format chat, generate, and print a separator."""
+        print(f"\n====== {title} | thinking={thinking} ======")
+        text = tokenizer.apply_chat_template(
+            conversation,
+            tokenize              = False,
+            add_generation_prompt = True,
+            enable_thinking       = thinking,
+        )
+        _ = model.generate(
+            **tokenizer(text, return_tensors="pt").to(model.device),
+            max_new_tokens = 256 if not thinking else 1024,
+            temperature    = 0.6 if thinking else 0.7,
+            top_p          = 0.95 if thinking else 0.8,
+            top_k          = 20,
+            streamer       = TextStreamer(tokenizer, skip_prompt=True),
+        )
 
-    acc = evaluate_exact_match(dataset_dict["eval"])
-    print(f"\nExact-match accuracy on eval subset: {acc:.4f}")
+    # Shared function schema --------------------------------------------------
+    fn_schema = (
+        "You are a helpful assistant with access to the following function. "
+        "Use it **only** when it helps the user.\n"
+        "{\n"
+        '  "name": "get_exchange_rate",\n'
+        '  "description": "Get the exchange rate between two currencies",\n'
+        '  "parameters": {\n'
+        '    "type": "object",\n'
+        '    "properties": {\n'
+        '      "base_currency":   {"type": "string", '
+        '"description": "Currency to convert from"},\n'
+        '      "target_currency": {"type": "string", '
+        '"description": "Currency to convert to"}\n'
+        '    },\n'
+        '    "required": ["base_currency", "target_currency"]\n'
+        "  }\n"
+        "}"
+    )
 
-    # 8) Plot loss / eval-loss -------------------------------------------------
+    # Case A ─ function is **irrelevant**
+    msgs_irrelevant = [
+        {"role": "system", "content": fn_schema},
+        {"role": "user",
+         "content": ("Can you book a flight for me from New York to London "
+                     "next Tuesday?")}
+    ]
+    run_generation("IRRELEVANT-FUNCTION", msgs_irrelevant, thinking=False)
+    run_generation("IRRELEVANT-FUNCTION", msgs_irrelevant, thinking=True)
+
+    # Case B ─ function is **relevant**
+    msgs_relevant = [
+        {"role": "system", "content": fn_schema},
+        {"role": "user",
+         "content": "What's the exchange rate from USD to EUR right now?"}
+    ]
+    run_generation("RELEVANT-FUNCTION", msgs_relevant, thinking=False)
+    run_generation("RELEVANT-FUNCTION", msgs_relevant, thinking=True)
+
+    # ----------------------------------------------------------------------- #
+    # 8) Plot training / eval loss ------------------------------------------- #
     history = pd.DataFrame(trainer.state.log_history)  # step,loss,eval_loss,...
     plt.figure()
     plt.plot(history["step"], history["loss"], label="train_loss")
@@ -197,5 +274,9 @@ def main():
     plt.savefig(png_path, dpi=150)
     print(f"\nSaved plot to {png_path}")
 
+
+# --------------------------------------------------------------------------- #
+# Entrypoint
+# --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     main()
