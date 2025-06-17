@@ -190,7 +190,6 @@ def main():
             save_strategy               = "steps",
             save_steps                  = 100,
             save_total_limit            = 2,
-            evaluation_strategy         = "steps",
             max_steps                   = 100,
         ),
     )
