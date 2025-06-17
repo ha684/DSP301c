@@ -89,12 +89,12 @@ def get_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model_name", default="Qwen/Qwen3-4B")
     p.add_argument("--max_seq_length", type=int, default=2048)
-    p.add_argument("--function_call_pct", type=float, default=0.25)
+    p.add_argument("--function_call_pct", type=float, default=0.5)
     p.add_argument("--eval_pct", type=float, default=0.02)
     p.add_argument("--max_steps", type=int, default=3)
     p.add_argument("--per_device_batch_size", type=int, default=1)
     p.add_argument("--gradient_accum", type=int, default=4)
-    p.add_argument("--lr", type=float, default=2e-5)
+    p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--output_dir", default="./outputs")
     return p.parse_args()
 
@@ -228,7 +228,7 @@ def main():
                 top_p              = 0.9,
                 top_k              = 40,
                 pad_token_id       = tokenizer.pad_token_id,
-                eos_token_id       = tokenizer.eos_token_id,
+                eos_token_id       = None,
                 stopping_criteria  = StoppingCriteriaList([FunctionCallStopping()]),
             )[0]
 
